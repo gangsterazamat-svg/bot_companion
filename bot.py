@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, Optional
 import asyncio
 
-from telegram import Update, Bot
+from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import httpx
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"  # Используем бесплатную модель
+DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 BOT_USERNAME = None  # Будет определено при запуске
 
 # Директории для хранения данных
@@ -28,6 +28,15 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Файл для хранения системных промтов
 SYSTEM_PROMPTS_FILE = os.path.join(DATA_DIR, "system_prompts.json")
 USER_INFO_FILE = os.path.join(DATA_DIR, "user_info.json")
+
+# Создание постоянной клавиатуры с командами
+def create_main_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("🤖 Настроить бота")],
+        [KeyboardButton("👤 Мой профиль"), KeyboardButton("❓ Помощь")],
+        [KeyboardButton("🔄 Начать заново")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 # Загрузка данных
 def load_system_prompts() -> Dict:
@@ -118,7 +127,7 @@ async def generate_text(prompt: str, system_message: str = "", user_id: str = ""
         }
         
         # Настройка HTTP клиента с таймаутами
-        timeout = httpx.Timeout(45.0, connect=15.0)  # Увеличенные таймауты для большой модели
+        timeout = httpx.Timeout(45.0, connect=15.0)
         
         async with httpx.AsyncClient(timeout=timeout) as client:
             # Попытка с повторами
@@ -234,15 +243,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👋 Привет, {username}!\n\n"
             "Я ваш персональный ассистент с возможностью настройки характера и поведения.\n"
             f"Использую мощную модель: {DEFAULT_MODEL}\n\n"
-            "Доступные команды:\n"
-            "/setup - Настроить системный промт и информацию о себе\n"
-            "/profile - Посмотреть/изменить ваш профиль\n"
-            "/help - Показать справку\n\n"
-            "Вы можете общаться со мной в личных сообщениях или упоминать меня в группах "
-            f"(например: @{BOT_USERNAME} привет!)"
+            "Используйте кнопки внизу экрана для навигации по боту 🔽"
         )
         
-        await update.message.reply_text(welcome_message)
+        # Отправляем сообщение с постоянной клавиатурой
+        await update.message.reply_text(
+            welcome_message, 
+            reply_markup=create_main_keyboard()
+        )
     except Exception as e:
         logger.error(f"Ошибка в start: {e}")
 
@@ -259,14 +267,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "В группах:\n"
             f"Упомяните меня @{BOT_USERNAME} и ваше сообщение, чтобы я ответил\n\n"
             "Команды:\n"
-            "/start - Начать работу с ботом\n"
-            "/setup - Настроить системный промт и информацию о себе\n"
-            "/profile - Посмотреть/изменить ваш профиль\n"
-            "/help - Показать эту справку\n\n"
+            "🤖 Настроить бота - Настроить системный промт и информацию о себе\n"
+            "👤 Мой профиль - Посмотреть/изменить ваш профиль\n"
+            "❓ Помощь - Показать эту справку\n"
+            "🔄 Начать заново - Перезапустить настройку бота\n\n"
             f"Используемая модель: {DEFAULT_MODEL}"
         )
         
-        await update.message.reply_text(help_text)
+        await update.message.reply_text(help_text, reply_markup=create_main_keyboard())
     except Exception as e:
         logger.error(f"Ошибка в help_command: {e}")
 
@@ -289,7 +297,7 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Введите новый системный промт или отправьте 'пропустить' чтобы оставить текущий:"
         )
         
-        await update.message.reply_text(setup_message)
+        await update.message.reply_text(setup_message, reply_markup=create_main_keyboard())
     except Exception as e:
         logger.error(f"Ошибка в setup_command: {e}")
 
@@ -319,14 +327,35 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile_message += "\nХотите обновить информацию? Ответьте 'да' или 'нет'"
         
         USER_STATES[user_id] = "PROFILE_UPDATE_CONFIRM"
-        await update.message.reply_text(profile_message)
+        await update.message.reply_text(profile_message, reply_markup=create_main_keyboard())
     except Exception as e:
         logger.error(f"Ошибка в profile_command: {e}")
+
+# Обработчик команды сброса
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not update.effective_user or not update.message:
+            return
+            
+        user_id = str(update.effective_user.id)
+        
+        # Сбрасываем состояние пользователя
+        if user_id in USER_STATES:
+            USER_STATES.pop(user_id, None)
+        
+        reset_message = (
+            "🔄 Настройки бота сброшены!\n\n"
+            "Теперь вы можете заново настроить бота с помощью кнопки '🤖 Настроить бота'"
+        )
+        
+        await update.message.reply_text(reset_message, reply_markup=create_main_keyboard())
+    except Exception as e:
+        logger.error(f"Ошибка в reset_command: {e}")
 
 # Состояния пользователей
 USER_STATES = {}
 
-# Обработчик текстовых сообщений
+# Обработчик текстовых сообщений (включая нажатия кнопок)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Проверка наличия необходимых данных
@@ -336,6 +365,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         message_text = update.message.text.strip()
         chat_type = update.effective_chat.type if update.effective_chat else 'private'
+        
+        # Обработка нажатий кнопок
+        if message_text == "🤖 Настроить бота":
+            await setup_command(update, context)
+            return
+        elif message_text == "👤 Мой профиль":
+            await profile_command(update, context)
+            return
+        elif message_text == "❓ Помощь":
+            await help_command(update, context)
+            return
+        elif message_text == "🔄 Начать заново":
+            await reset_command(update, context)
+            return
         
         # Если это группа и бот не упомянут, игнорируем
         if chat_type in ['group', 'supergroup']:
@@ -366,7 +409,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Если сообщение пустое после очистки
         if not message_text:
-            await update.message.reply_text("Пожалуйста, введите текст сообщения.")
+            await update.message.reply_text(
+                "Пожалуйста, введите текст сообщения или используйте кнопки.", 
+                reply_markup=create_main_keyboard()
+            )
             return
         
         # Обработка состояний настройки
@@ -381,7 +427,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Системный промт оставлен без изменений.")
                 
                 USER_STATES[user_id] = "SETUP_NAME"
-                await update.message.reply_text("Как вас зовут? (или 'пропустить')")
+                await update.message.reply_text("Как вас зовут? (или 'пропустить')", reply_markup=create_main_keyboard())
                 return
             
             elif state == "SETUP_NAME":
@@ -394,7 +440,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Имя пропущено.")
                 
                 USER_STATES[user_id] = "SETUP_AGE"
-                await update.message.reply_text("Сколько вам лет? (или 'пропустить')")
+                await update.message.reply_text("Сколько вам лет? (или 'пропустить')", reply_markup=create_main_keyboard())
                 return
             
             elif state == "SETUP_AGE":
@@ -411,7 +457,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Возраст пропущен.")
                 
                 USER_STATES[user_id] = "SETUP_INTERESTS"
-                await update.message.reply_text("Какими у вас интересы? (или 'пропустить')")
+                await update.message.reply_text("Какими у вас интересы? (или 'пропустить')", reply_markup=create_main_keyboard())
                 return
             
             elif state == "SETUP_INTERESTS":
@@ -424,7 +470,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Интересы пропущены.")
                 
                 USER_STATES[user_id] = "SETUP_PERSONALITY"
-                await update.message.reply_text("Опишите ваш характер/личность: (или 'пропустить')")
+                await update.message.reply_text("Опишите ваш характер/личность: (или 'пропустить')", reply_markup=create_main_keyboard())
                 return
             
             elif state == "SETUP_PERSONALITY":
@@ -437,16 +483,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Характер пропущен.")
                 
                 USER_STATES.pop(user_id, None)
-                await update.message.reply_text("✅ Настройка завершена! Теперь я знаю о вас больше.")
+                completion_message = (
+                    "✅ Настройка завершена! Теперь я знаю о вас больше.\n"
+                    "Используйте кнопки внизу для дальнейшей работы с ботом."
+                )
+                await update.message.reply_text(completion_message, reply_markup=create_main_keyboard())
                 return
             
             elif state == "PROFILE_UPDATE_CONFIRM":
                 if message_text.lower() in ['да', 'yes', 'y']:
                     USER_STATES[user_id] = "SETUP_NAME"
-                    await update.message.reply_text("Как вас зовут? (или 'пропустить')")
+                    await update.message.reply_text("Как вас зовут? (или 'пропустить')", reply_markup=create_main_keyboard())
                 else:
                     USER_STATES.pop(user_id, None)
-                    await update.message.reply_text("Хорошо, оставим как есть.")
+                    await update.message.reply_text("Хорошо, оставим как есть.", reply_markup=create_main_keyboard())
                 return
         
         # Генерация ответа
@@ -455,7 +505,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Добавляем контекст в промпт
         full_prompt = message_text
         
-        await update.message.reply_text("🤔 Думаю...")
+        await update.message.reply_text("🤔 Думаю...", reply_markup=create_main_keyboard())
         response = await generate_text(full_prompt, system_prompt, user_id)
         
         # Проверка ответа
@@ -468,17 +518,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(response) > 4096:
                 # Разбиваем на части по 4096 символов
                 for i in range(0, len(response), 4096):
-                    await update.message.reply_text(response[i:i+4096])
+                    await update.message.reply_text(response[i:i+4096], reply_markup=create_main_keyboard())
             else:
-                await update.message.reply_text(response)
+                await update.message.reply_text(response, reply_markup=create_main_keyboard())
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения: {e}")
-            await update.message.reply_text("✅ Ответ сгенерирован, но возникла ошибка при отправке.")
+            await update.message.reply_text(
+                "✅ Ответ сгенерирован, но возникла ошибка при отправке.", 
+                reply_markup=create_main_keyboard()
+            )
             
     except Exception as e:
         logger.error(f"Ошибка в handle_message: {e}")
         try:
-            await update.message.reply_text("❌ Произошла ошибка при обработке вашего сообщения. Попробуйте позже.")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при обработке вашего сообщения. Попробуйте позже.", 
+                reply_markup=create_main_keyboard()
+            )
         except:
             pass
 
@@ -527,11 +583,14 @@ def main():
         # Регистрируем обработчик ошибок
         application.add_error_handler(error_handler)
         
-        # Регистрируем обработчики
+        # Регистрируем обработчики команд
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("setup", setup_command))
         application.add_handler(CommandHandler("profile", profile_command))
+        application.add_handler(CommandHandler("reset", reset_command))
+        
+        # Регистрируем обработчик текстовых сообщений (включая кнопки)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # Запускаем бота
