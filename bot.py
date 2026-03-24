@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import asyncio
 
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton
@@ -21,6 +21,13 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 BOT_USERNAME = None  # Будет определено при запуске
 
+# Доступные модели
+AVAILABLE_MODELS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+    "minimax/minimax-m2.5:free"
+]
+
 # Директории для хранения данных
 DATA_DIR = "user_data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -28,14 +35,29 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Файл для хранения системных промтов
 SYSTEM_PROMPTS_FILE = os.path.join(DATA_DIR, "system_prompts.json")
 USER_INFO_FILE = os.path.join(DATA_DIR, "user_info.json")
+USER_MODELS_FILE = os.path.join(DATA_DIR, "user_models.json")
 
 # Создание постоянной клавиатуры с командами
 def create_main_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton("🤖 Настроить бота")],
+        [KeyboardButton("🤖 Настроить бота"), KeyboardButton("🧠 Выбор модели")],
         [KeyboardButton("👤 Мой профиль"), KeyboardButton("❓ Помощь")],
         [KeyboardButton("🔄 Начать заново")]
     ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+# Создание клавиатуры выбора модели
+def create_model_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = []
+    for i, model in enumerate(AVAILABLE_MODELS):
+        if i % 2 == 0:
+            keyboard.append([KeyboardButton(model)])
+        else:
+            keyboard[-1].append(KeyboardButton(model))
+    
+    # Добавляем кнопку возврата
+    keyboard.append([KeyboardButton("🔙 Назад")])
+    
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 # Загрузка данных
@@ -57,6 +79,15 @@ def load_user_info() -> Dict:
         logger.error(f"Ошибка загрузки информации о пользователях: {e}")
     return {}
 
+def load_user_models() -> Dict:
+    try:
+        if os.path.exists(USER_MODELS_FILE):
+            with open(USER_MODELS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки пользовательских моделей: {e}")
+    return {}
+
 # Сохранение данных
 def save_system_prompts(prompts: Dict):
     try:
@@ -72,15 +103,92 @@ def save_user_info(user_info: Dict):
     except Exception as e:
         logger.error(f"Ошибка сохранения информации о пользователях: {e}")
 
+def save_user_models(user_models: Dict):
+    try:
+        with open(USER_MODELS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_models, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения пользовательских моделей: {e}")
+
 # Глобальные переменные для данных
 SYSTEM_PROMPTS = load_system_prompts()
 USER_INFO = load_user_info()
+USER_MODELS = load_user_models()
+
+# Получение модели пользователя
+def get_user_model(user_id: str) -> str:
+    return USER_MODELS.get(user_id, DEFAULT_MODEL)
+
+# Сохранение модели пользователя
+def set_user_model(user_id: str, model: str):
+    USER_MODELS[user_id] = model
+    save_user_models(USER_MODELS)
+
+# Разделение длинного текста на части
+def split_long_message(text: str, max_length: int = 4000) -> List[str]:
+    """Разделяет длинный текст на части, сохраняя целостность предложений"""
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current_part = ""
+    
+    # Разбиваем текст на предложения
+    sentences = []
+    current_sentence = ""
+    
+    for char in text:
+        current_sentence += char
+        if char in '.!?':
+            sentences.append(current_sentence.strip())
+            current_sentence = ""
+    
+    # Добавляем остаток, если есть
+    if current_sentence.strip():
+        sentences.append(current_sentence.strip())
+    
+    # Собираем части
+    for sentence in sentences:
+        if len(current_part + sentence) <= max_length:
+            current_part += sentence + " "
+        else:
+            if current_part:
+                parts.append(current_part.strip())
+            current_part = sentence + " "
+    
+    # Добавляем последнюю часть
+    if current_part:
+        parts.append(current_part.strip())
+    
+    # Если какая-то часть все равно слишком длинная, разбиваем по словам
+    final_parts = []
+    for part in parts:
+        if len(part) <= max_length:
+            final_parts.append(part)
+        else:
+            # Разбиваем по словам
+            words = part.split()
+            current_chunk = ""
+            for word in words:
+                if len(current_chunk + word) <= max_length:
+                    current_chunk += word + " "
+                else:
+                    if current_chunk:
+                        final_parts.append(current_chunk.strip())
+                    current_chunk = word + " "
+            if current_chunk:
+                final_parts.append(current_chunk.strip())
+    
+    return final_parts if final_parts else [text[:max_length]]
 
 # Генерация текста через OpenRouter API
 async def generate_text(prompt: str, system_message: str = "", user_id: str = "") -> str:
     # Проверка наличия API ключа
     if not OPENROUTER_API_KEY:
         return "❌ Не настроен API ключ OpenRouter. Обратитесь к администратору бота."
+    
+    # Получаем модель пользователя
+    model = get_user_model(user_id)
     
     try:
         headers = {
@@ -120,14 +228,14 @@ async def generate_text(prompt: str, system_message: str = "", user_id: str = ""
         messages.append({"role": "user", "content": prompt})
         
         data = {
-            "model": DEFAULT_MODEL,
+            "model": model,
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 1000
+            "max_tokens": 2000  # Увеличено для больших моделей
         }
         
         # Настройка HTTP клиента с таймаутами
-        timeout = httpx.Timeout(45.0, connect=15.0)
+        timeout = httpx.Timeout(60.0, connect=20.0)  # Увеличенные таймауты
         
         async with httpx.AsyncClient(timeout=timeout) as client:
             # Попытка с повторами
@@ -177,7 +285,7 @@ async def generate_text(prompt: str, system_message: str = "", user_id: str = ""
                 except httpx.TimeoutException:
                     logger.warning(f"Таймаут при подключении к OpenRouter API, попытка {attempt + 1}")
                     if attempt < 2:
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)  # Увеличено время ожидания
                         continue
                     else:
                         return "❌ Превышено время ожидания ответа от API. Попробуйте позже."
@@ -185,7 +293,7 @@ async def generate_text(prompt: str, system_message: str = "", user_id: str = ""
                 except httpx.ConnectError as e:
                     logger.error(f"Ошибка подключения к OpenRouter API (попытка {attempt + 1}): {e}")
                     if attempt < 2:
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)
                         continue
                     else:
                         return "❌ Ошибка подключения к API. Проверьте интернет-соединение."
@@ -193,7 +301,7 @@ async def generate_text(prompt: str, system_message: str = "", user_id: str = ""
                 except httpx.NetworkError as e:
                     logger.error(f"Сетевая ошибка (попытка {attempt + 1}): {e}")
                     if attempt < 2:
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)
                         continue
                     else:
                         return "❌ Сетевая ошибка. Проверьте подключение к интернету."
@@ -201,7 +309,7 @@ async def generate_text(prompt: str, system_message: str = "", user_id: str = ""
                 except Exception as e:
                     logger.error(f"Неожиданная ошибка при запросе к API (попытка {attempt + 1}): {e}")
                     if attempt < 2:
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)
                         continue
                     else:
                         return "❌ Произошла ошибка при обращении к API. Попробуйте позже."
@@ -242,7 +350,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_message = (
             f"👋 Привет, {username}!\n\n"
             "Я ваш персональный ассистент с возможностью настройки характера и поведения.\n"
-            f"Использую мощную модель: {DEFAULT_MODEL}\n\n"
+            f"Использую модель: {get_user_model(user_id)}\n\n"
             "Используйте кнопки внизу экрана для навигации по боту 🔽"
         )
         
@@ -260,6 +368,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message:
             return
             
+        user_id = str(update.effective_user.id) if update.effective_user else "unknown"
+        current_model = get_user_model(user_id)
+        
         help_text = (
             "🤖 Справка по боту\n\n"
             "В личных сообщениях:\n"
@@ -268,10 +379,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Упомяните меня @{BOT_USERNAME} и ваше сообщение, чтобы я ответил\n\n"
             "Команды:\n"
             "🤖 Настроить бота - Настроить системный промт и информацию о себе\n"
+            "🧠 Выбор модели - Выбрать модель ИИ для общения\n"
             "👤 Мой профиль - Посмотреть/изменить ваш профиль\n"
             "❓ Помощь - Показать эту справку\n"
             "🔄 Начать заново - Перезапустить настройку бота\n\n"
-            f"Используемая модель: {DEFAULT_MODEL}"
+            f"Текущая модель: {current_model}\n"
+            f"Доступные модели: {', '.join(AVAILABLE_MODELS)}"
         )
         
         await update.message.reply_text(help_text, reply_markup=create_main_keyboard())
@@ -309,8 +422,12 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         user_id = str(update.effective_user.id)
         user_info = get_user_info(user_id)
+        current_model = get_user_model(user_id)
         
-        profile_message = "👤 Ваш профиль:\n\n"
+        profile_message = (
+            "👤 Ваш профиль:\n\n"
+            f"Модель ИИ: {current_model}\n\n"
+        )
         
         if user_info:
             if user_info.get('name'):
@@ -352,6 +469,26 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в reset_command: {e}")
 
+# Обработчик выбора модели
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not update.effective_user or not update.message:
+            return
+            
+        user_id = str(update.effective_user.id)
+        current_model = get_user_model(user_id)
+        
+        model_message = (
+            f"🧠 Выбор модели ИИ\n\n"
+            f"Текущая модель: {current_model}\n\n"
+            "Выберите одну из доступных моделей:"
+        )
+        
+        USER_STATES[user_id] = "MODEL_SELECTION"
+        await update.message.reply_text(model_message, reply_markup=create_model_keyboard())
+    except Exception as e:
+        logger.error(f"Ошибка в model_command: {e}")
+
 # Состояния пользователей
 USER_STATES = {}
 
@@ -370,6 +507,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message_text == "🤖 Настроить бота":
             await setup_command(update, context)
             return
+        elif message_text == "🧠 Выбор модели":
+            await model_command(update, context)
+            return
         elif message_text == "👤 Мой профиль":
             await profile_command(update, context)
             return
@@ -379,6 +519,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif message_text == "🔄 Начать заново":
             await reset_command(update, context)
             return
+        elif message_text == "🔙 Назад":
+            # Возвращаемся к основной клавиатуре
+            USER_STATES.pop(user_id, None)
+            await update.message.reply_text("Возвращаемся к основному меню", reply_markup=create_main_keyboard())
+            return
+        
+        # Обработка состояния выбора модели
+        if user_id in USER_STATES and USER_STATES[user_id] == "MODEL_SELECTION":
+            if message_text in AVAILABLE_MODELS:
+                set_user_model(user_id, message_text)
+                USER_STATES.pop(user_id, None)
+                await update.message.reply_text(
+                    f"✅ Модель успешно изменена на: {message_text}", 
+                    reply_markup=create_main_keyboard()
+                )
+                return
+            elif message_text == "🔙 Назад":
+                USER_STATES.pop(user_id, None)
+                await update.message.reply_text("Возвращаемся к основному меню", reply_markup=create_main_keyboard())
+                return
+            else:
+                await update.message.reply_text(
+                    "Пожалуйста, выберите модель из списка или нажмите 'Назад'", 
+                    reply_markup=create_model_keyboard()
+                )
+                return
         
         # Если это группа и бот не упомянут, игнорируем
         if chat_type in ['group', 'supergroup']:
@@ -512,15 +678,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not response:
             response = "Извините, не удалось сгенерировать ответ."
         
-        # Отправляем ответ с обработкой ошибок
+        # Отправляем ответ с обработкой ошибок и разделением на части
         try:
             # Разбиваем длинные сообщения
-            if len(response) > 4096:
-                # Разбиваем на части по 4096 символов
-                for i in range(0, len(response), 4096):
-                    await update.message.reply_text(response[i:i+4096], reply_markup=create_main_keyboard())
-            else:
-                await update.message.reply_text(response, reply_markup=create_main_keyboard())
+            message_parts = split_long_message(response)
+            
+            for i, part in enumerate(message_parts):
+                if i == 0:
+                    # Первое сообщение с клавиатурой
+                    await update.message.reply_text(part, reply_markup=create_main_keyboard())
+                else:
+                    # Последующие сообщения без клавиатуры
+                    await update.message.reply_text(part)
+                    
+                # Небольшая задержка между сообщениями для лучшего UX
+                if len(message_parts) > 1 and i < len(message_parts) - 1:
+                    await asyncio.sleep(0.5)
+                    
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения: {e}")
             await update.message.reply_text(
@@ -546,7 +720,7 @@ async def post_init(application: Application) -> None:
         me = await bot.get_me()
         BOT_USERNAME = me.username
         logger.info(f"Бот @{BOT_USERNAME} запущен!")
-        logger.info(f"Используется модель: {DEFAULT_MODEL}")
+        logger.info(f"Доступные модели: {AVAILABLE_MODELS}")
     except Exception as e:
         logger.error(f"Ошибка при инициализации бота: {e}")
 
@@ -574,8 +748,8 @@ def main():
             .token(token)
             .post_init(post_init)
             .connect_timeout(30.0)
-            .read_timeout(30.0)
-            .write_timeout(30.0)
+            .read_timeout(60.0)  # Увеличен таймаут чтения
+            .write_timeout(60.0)  # Увеличен таймаут записи
             .pool_timeout(30.0)
             .build()
         )
@@ -596,7 +770,7 @@ def main():
         # Запускаем бота
         logger.info("Бот запущен...")
         print(f"✅ Бот успешно запущен!")
-        print(f"🤖 Используется модель: {DEFAULT_MODEL}")
+        print(f"🤖 Доступные модели: {AVAILABLE_MODELS}")
         if BOT_USERNAME:
             print(f"🔗 Username бота: @{BOT_USERNAME}")
         application.run_polling(drop_pending_updates=True)
